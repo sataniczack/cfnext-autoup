@@ -1,4 +1,3 @@
-
 name: Sync from CFNext
 
 on:
@@ -26,8 +25,6 @@ jobs:
       - name: Check upstream ZIP
         id: upstream
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -35,22 +32,23 @@ jobs:
 
           curl -fsSL \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
             "$API_URL" \
             -o /tmp/cfnext-file.json
 
           UPSTREAM_SHA="$(jq -er '.sha' /tmp/cfnext-file.json)"
-          DOWNLOAD_URL="$(jq -er '.download_url' /tmp/cfnext-file.json)"
 
-          if [[ -z "$UPSTREAM_SHA" || -z "$DOWNLOAD_URL" ]]; then
-            echo "Failed to obtain upstream file metadata."
+          if [[ -z "$UPSTREAM_SHA" ]]; then
+            echo "::error::Failed to obtain upstream file SHA."
             exit 1
           fi
+
+          # Use a URL with the Chinese filename percent-encoded.
+          DOWNLOAD_URL="https://raw.githubusercontent.com/PAICNI/CFNext/main/CFNext%20%E6%B7%B7%E6%B7%86Pages%E7%89%88.zip"
 
           echo "sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
           echo "url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
 
-          echo "Upstream file SHA: $UPSTREAM_SHA"
+          echo "Upstream ZIP SHA: $UPSTREAM_SHA"
 
       - name: Compare upstream SHA
         id: compare
@@ -87,12 +85,12 @@ jobs:
           ZIP_PATH="$(mktemp /tmp/cfnext-pages-XXXXXX.zip)"
           trap 'rm -f "$ZIP_PATH"' EXIT
 
-          curl -fL --retry 3 --retry-delay 2 \
+          curl -fLsS --retry 3 --retry-delay 2 \
             "$DOWNLOAD_URL" \
             -o "$ZIP_PATH"
 
           if ! unzip -tq "$ZIP_PATH"; then
-            echo "Downloaded file is not a valid ZIP."
+            echo "::error::Downloaded file is not a valid ZIP."
             exit 1
           fi
 
