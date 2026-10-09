@@ -1,0 +1,123 @@
+
+name: Sync from CFNext
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-cfnext
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check upstream ZIP
+        id: upstream
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          API_URL="https://api.github.com/repos/PAICNI/CFNext/contents/CFNext%20%E6%B7%B7%E6%B7%86Pages%E7%89%88.zip?ref=main"
+
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "$API_URL" \
+            -o /tmp/cfnext-file.json
+
+          UPSTREAM_SHA="$(jq -er '.sha' /tmp/cfnext-file.json)"
+          DOWNLOAD_URL="$(jq -er '.download_url' /tmp/cfnext-file.json)"
+
+          if [[ -z "$UPSTREAM_SHA" || -z "$DOWNLOAD_URL" ]]; then
+            echo "Failed to obtain upstream file metadata."
+            exit 1
+          fi
+
+          echo "sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "url=$DOWNLOAD_URL" >> "$GITHUB_OUTPUT"
+
+          echo "Upstream file SHA: $UPSTREAM_SHA"
+
+      - name: Compare upstream SHA
+        id: compare
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          SHA_FILE=".github/CFNEXT_UPSTREAM_SHA.txt"
+          OLD_SHA=""
+
+          if [[ -f "$SHA_FILE" ]]; then
+            OLD_SHA="$(tr -d '[:space:]' < "$SHA_FILE")"
+          fi
+
+          if [[ "$UPSTREAM_SHA" == "$OLD_SHA" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "CFNext ZIP has not changed."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "CFNext ZIP has changed. Sync required."
+          fi
+
+      - name: Download and extract CFNext Pages ZIP
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        env:
+          DOWNLOAD_URL: ${{ steps.upstream.outputs.url }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          ZIP_PATH="$(mktemp /tmp/cfnext-pages-XXXXXX.zip)"
+          trap 'rm -f "$ZIP_PATH"' EXIT
+
+          curl -fL --retry 3 --retry-delay 2 \
+            "$DOWNLOAD_URL" \
+            -o "$ZIP_PATH"
+
+          if ! unzip -tq "$ZIP_PATH"; then
+            echo "Downloaded file is not a valid ZIP."
+            exit 1
+          fi
+
+          unzip -o "$ZIP_PATH" -d .
+
+          mkdir -p .github
+          printf '%s\n' "$UPSTREAM_SHA" \
+            > .github/CFNEXT_UPSTREAM_SHA.txt
+
+      - name: Commit and push changes
+        if: steps.compare.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No file changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: sync CFNext Pages ZIP"
+          git push
